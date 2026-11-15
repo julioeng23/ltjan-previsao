@@ -294,47 +294,77 @@ def modelo(forcar, anterior):
 # ---------------------------------------------------------------- INMET
 ICONES = []
 
+def _icone(v):
+    ic = v.get('icone') or ''
+    if ic and ic not in ICONES:
+        ICONES.append(ic)
+    return ICONES.index(ic) if ic else -1
+
+
+def _periodo(v):
+    """Resumo de um período do INMET (dia inteiro ou turno)."""
+    o = {'resumo': v.get('resumo') or v.get('tempo') or '', 'ic': _icone(v),
+         'tmax': v.get('temp_max'), 'tmin': v.get('temp_min'),
+         'vento': ' '.join(x for x in [v.get('dir_vento') or '', v.get('int_vento') or ''] if x),
+         'umid': [v.get('umidade_min'), v.get('umidade_max')]}
+    return o
+
+
+def _poligono(txt):
+    """GeoJSON do aviso com coordenadas arredondadas (arquivo menor)."""
+    try:
+        g = json.loads(txt) if isinstance(txt, str) else txt
+        def rd(c):
+            return [rd(x) for x in c] if isinstance(c[0], list) else [round(c[0], 3), round(c[1], 3)]
+        return {'type': g['type'], 'coordinates': rd(g['coordinates'])}
+    except Exception:
+        return None
+
+
 def inmet():
     prev, ok = {}, 0
     for g, n, *_ in MUN:
         try:
-            r = get(f'{INMET}/previsao/{g}', tent=2)
+            r = get(f'{INMET}/previsao/{g}', tent=3)
             j = r.json() if r is not None else None
             dd = (j or {}).get(str(g)) or (list(j.values())[0] if j else None)
             if not dd:
                 continue
             prev[g] = {}
             for data, v in dd.items():
-                p = v.get('tarde') or v.get('manha') or v
                 iso = '-'.join(reversed(data.split('/')))
-                tmax = v.get('temp_max', p.get('temp_max'))
-                tmin = v.get('temp_min', p.get('temp_min'))
-                if tmin is None and v.get('manha'):
-                    tmin = v['manha'].get('temp_min')
-                ic = p.get('icone') or ''
-                if ic and ic not in ICONES:
-                    ICONES.append(ic)
-                prev[g][iso] = {'tmax': tmax, 'tmin': tmin, 'resumo': p.get('resumo') or p.get('tempo') or '', 'ic': ICONES.index(ic) if ic else -1}
+                if v.get('manha') or v.get('tarde'):
+                    tur = {k: _periodo(v[k]) for k in ('manha', 'tarde', 'noite') if v.get(k)}
+                    base = dict(tur.get('tarde') or tur.get('manha') or next(iter(tur.values())))
+                    tx = [t['tmax'] for t in tur.values() if t['tmax'] is not None]
+                    tn = [t['tmin'] for t in tur.values() if t['tmin'] is not None]
+                    base['tmax'] = max(tx) if tx else None
+                    base['tmin'] = min(tn) if tn else None
+                    base['tur'] = tur
+                else:
+                    base = _periodo(v)
+                prev[g][iso] = base
             ok += 1
         except Exception as e:
             log(f'  INMET {n}: {e}')
     avisos = None
     try:
-        r = get(f'{INMET}/avisos/ativos', tent=2)
+        r = get(f'{INMET}/avisos/ativos', tent=3)
         if r is not None:
             j = r.json()
             arr = []
-            for v in (j.values() if isinstance(j, dict) else [j]):
+            for k, v in (j.items() if isinstance(j, dict) else [('hoje', j)]):
                 if isinstance(v, list):
-                    arr += v
-            geos = [str(m[0]) for m in MUN]
+                    arr += [(k, a) for a in v]
             avisos = []
-            for a in arr:
-                s = json.dumps(a, ensure_ascii=False)
-                if any(g in s for g in geos):
-                    avisos.append({'desc': a.get('descricao') or a.get('evento') or 'Aviso', 'sev': a.get('severidade') or '',
-                                   'ini': a.get('inicio') or '', 'fim': a.get('fim') or '',
-                                   'mun': [m[1] for m in MUN if str(m[0]) in s]})
+            for k, a in arr:
+                geo = str(a.get('geocodes') or '')
+                mun = [m[1] for m in MUN if str(m[0]) in geo]
+                if not mun:
+                    continue
+                avisos.append({'desc': a.get('descricao') or 'Aviso', 'sev': a.get('severidade') or '', 'cor': a.get('aviso_cor') or '#FF9900',
+                               'ini': a.get('inicio') or '', 'fim': a.get('fim') or '', 'fut': k != 'hoje', 'mun': mun,
+                               'riscos': a.get('riscos') or '', 'instr': a.get('instrucoes') or '', 'poli': _poligono(a.get('poligono'))})
     except Exception as e:
         log(f'  INMET avisos: {e}')
     log(f'INMET: {ok}/{len(MUN)} municípios; avisos: {"—" if avisos is None else len(avisos)}')
@@ -361,7 +391,7 @@ def main():
         ICONES[:] = anterior.get('icones', [])
         avisos = avisos if avisos is not None else anterior.get('avisos')
     dados = {
-        'v': 1,
+        'v': 2,
         'gerado': dt.datetime.now(TZ).strftime('%Y-%m-%dT%H:%M'),
         'modelo': mod, 'erro_modelo': erro_mod,
         'inmet': {str(k): v for k, v in prev.items()}, 'inmetOk': ok, 'avisos': avisos, 'icones': ICONES,
