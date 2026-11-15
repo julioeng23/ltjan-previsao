@@ -1,0 +1,45 @@
+name: Previsao do tempo LT JAN
+# Roda a cada 3 h (horários em UTC = Brasília + 3) e publica só o último arquivo,
+# substituindo o anterior (branch "dados" com um único commit).
+on:
+  schedule:
+    - cron: '40 0,3,6,9,12,15,18,21 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: previsao
+  cancel-in-progress: false
+jobs:
+  previsao:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Arquivo anterior (evita baixar a mesma rodada de novo)
+        run: |
+          mkdir -p publicar
+          curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/dados/previsao_tempo.js" -o publicar/previsao_tempo.js || true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: pip install -r requirements.txt
+      - name: Gerar previsão
+        env:
+          LTJAN_SAIDA: publicar/previsao_tempo.js
+          LTJAN_LOG: publicar/log.txt
+        run: python previsao_tempo.py || echo "::warning::rodada com aviso (ver log)"
+      - name: Publicar (substitui a versão anterior)
+        run: |
+          cd publicar
+          tail -n 40 log.txt >> "$GITHUB_STEP_SUMMARY" || true
+          rm -f log.txt
+          touch .nojekyll
+          git init -q -b dados
+          git config user.name "previsao-bot"
+          git config user.email "previsao-bot@users.noreply.github.com"
+          git add -A
+          git commit -qm "previsão $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" dados
