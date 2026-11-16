@@ -98,6 +98,17 @@ def url_run(base, run, passo, ext):
     return f'{base}/{run:%Y%m%d}/{run:%H}z/ifs/0p25/oper/{run:%Y%m%d%H}0000-{passo}h-oper-fc.{ext}'
 
 
+def plano(run):
+    """Passos do ECMWF necessários para cobrir NDIAS dias a partir de HOJE (00h local), mesmo com rodada do dia anterior."""
+    dia0 = dt.datetime.now(TZ).date()
+    t0 = dt.datetime.combine(dia0, dt.time(0), TZ)
+    desloc = int((t0 - run).total_seconds() // 3600)          # passo UTC da hora local 0
+    nh = 24 * NDIAS
+    fim = -(-(desloc + nh) // 6) * 6                          # múltiplo de 6 h (após 144 h o modelo é de 6 em 6 h)
+    passos = list(range(0, 145, 3)) + list(range(150, max(150, fim) + 1, 6))
+    return passos, max(81, -(-(desloc + 72) // 3) * 3), dia0, t0, desloc, nh
+
+
 def achar_rodada():
     agora = dt.datetime.now(dt.timezone.utc)
     cands = []
@@ -107,7 +118,7 @@ def achar_rodada():
     for base in ESPELHOS:
         try:
             for run in cands:
-                r = SESS.head(url_run(base, run, PASSOS[-1], 'index'), timeout=30, allow_redirects=True)
+                r = SESS.head(url_run(base, run, plano(run)[0][-1], 'index'), timeout=30, allow_redirects=True)
                 if r.status_code == 200:
                     return base, run
         except Exception as e:
@@ -167,9 +178,12 @@ def recortar(msg):
 
 def modelo(forcar, anterior):
     import numpy as np
+    global PASSOS, PRAIO
     base, run = achar_rodada()
     run_txt = f'{run:%Y-%m-%dT%H}Z'
-    if not forcar and anterior and anterior.get('modelo') and anterior['modelo'].get('rodada') == run_txt and 'raio3' in anterior['modelo']:
+    # a previsão sempre começa HOJE (00h local) e vai NDIAS dias à frente, mesmo que a rodada seja do dia anterior
+    PASSOS, PRAIO, dia0, t0, desloc, nh = plano(run)
+    if not forcar and anterior and anterior.get('modelo') and anterior['modelo'].get('rodada') == run_txt and 'raio3' in anterior['modelo'] and (anterior['modelo'].get('dias') or [''])[0] == dia0.isoformat():
         log(f'ECMWF: rodada {run_txt} já está no arquivo — mantém')
         return anterior['modelo']
     log(f'ECMWF: rodada {run_txt} em {base}')
@@ -210,12 +224,7 @@ def modelo(forcar, anterior):
     campos = {t: recortar(b) for t, b in brutos.items()}   # eccodes sempre na thread principal
     del brutos
 
-    # séries locais: início = 00h local do dia de (rodada + 3 h)
-    run_loc = run.astimezone(TZ)
-    dia0 = (run_loc + dt.timedelta(hours=3)).date()
-    t0 = dt.datetime.combine(dia0, dt.time(0), TZ)
-    desloc = int((t0 - run).total_seconds() // 3600)          # passo UTC da hora local 0
-    nh = 24 * NDIAS
+    # séries locais: início = 00h local de hoje (dia0, t0, desloc e nh calculados acima)
     hora = np.full((nh, NLA, NLO), np.nan)                       # chuva mm/h
     for a, b in zip(PASSOS[:-1], PASSOS[1:]):
         mm = np.clip((campos[('tp', b)] - campos[('tp', a)]) * 1000.0, 0, None) / (b - a)
